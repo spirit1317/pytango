@@ -252,7 +252,7 @@ class MultiDeviceTestContext(object):
         if not instance_name:
             instance_name = server_name.lower()
         if db is None:
-            _, db = tempfile.mkstemp()
+            handle, db = tempfile.mkstemp()
         if host is None:
             # IP address is used instead of the hostname on purpose (see #246)
             host = get_host_ip()
@@ -262,6 +262,7 @@ class MultiDeviceTestContext(object):
         if process:
             os.environ['ORBscanGranularity'] = '0'
         # Attributes
+        self.handle = handle
         self.db = db
         self.host = host
         self.port = port
@@ -283,6 +284,7 @@ class MultiDeviceTestContext(object):
             device_cls, device = _device_class_from_field(device_info["class"])
             tangoclass = device.__name__
             if tangoclass in tangoclass_list:
+                os.close(self.handle)
                 os.unlink(self.db)
                 raise ValueError("multiple entries in devices_info pointing "
                                  "to the same Tango class")
@@ -297,6 +299,7 @@ class MultiDeviceTestContext(object):
 
         # Target and arguments
         if class_list and device_list:
+            os.close(self.handle)
             os.unlink(self.db)
             raise ValueError("mixing HLAPI and classical API in devices_info "
                              "is not supported")
