@@ -27,6 +27,7 @@ var/
 *.cfg
 !setup.cfg
 MANIFEST
+Release_*
 
 # Installer logs
 pip-log.txt
