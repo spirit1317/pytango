@@ -13,9 +13,6 @@ and is even likely to crash the device (!)
 
 """
 
-import gc
-import weakref
-
 from distutils.spawn import find_executable
 from subprocess import Popen
 import platform
@@ -23,23 +20,16 @@ from time import sleep
 
 import psutil
 import pytest
+from xprocess import ProcessStarter
 from functools import partial
 from tango import DeviceProxy, DevFailed, GreenMode
 from tango import DeviceInfo, AttributeInfo, AttributeInfoEx
-from tango.server import Device
 from tango.utils import is_str_type, is_int_type, is_float_type, is_bool_type
-from tango.test_utils import (
-    DeviceTestContext, PY3, assert_close, bytes_devstring, str_devstring
-)
+from tango.test_utils import PY3, assert_close, bytes_devstring, str_devstring
+
 from tango.gevent import DeviceProxy as gevent_DeviceProxy
 from tango.futures import DeviceProxy as futures_DeviceProxy
 from tango.asyncio import DeviceProxy as asyncio_DeviceProxy
-
-# Asyncio imports
-try:
-    import asyncio
-except ImportError:
-    import trollius as asyncio  # noqa: F401
 
 
 ATTRIBUTES = [
@@ -107,88 +97,7 @@ ATTRIBUTES = [
     'Status',
 ]
 
-
-device_proxy_map = {
-    GreenMode.Synchronous: DeviceProxy,
-    GreenMode.Futures: futures_DeviceProxy,
-    GreenMode.Asyncio: partial(asyncio_DeviceProxy, wait=True),
-    GreenMode.Gevent: gevent_DeviceProxy}
-
-
-# Helpers
-
-def get_ports(pid):
-    p = psutil.Process(pid)
-    conns = p.connections(kind="tcp")
-    # Sorting by family in order to make any IPv6 address go first.
-    # Otherwise there's a 50% chance that the proxy will just
-    # hang (presumably because it's connecting on the wrong port)
-    # This works on my machine, not sure if it's a general
-    # solution though.
-    conns = reversed(sorted(conns, key=lambda c: c.family))
-    return [c.laddr[1] for c in conns]
-
-
-def start_server(server, inst, device):
-    exe = find_executable(server)
-    cmd = ("{0} {1} -ORBendPoint giop:tcp::0 -nodb -dlist {2}"
-           .format(exe, inst, device))
-    proc = Popen(cmd.split(), close_fds=True)
-    proc.poll()
-    return proc
-
-
-def get_proxy(host, port, device, green_mode):
-    access = "tango://{0}:{1}/{2}#dbase=no".format(
-        host, port, device)
-    return device_proxy_map[green_mode](access)
-
-
-def wait_for_proxy(host, proc, device, green_mode, retries=400, delay=0.01):
-    for i in range(retries):
-        ports = get_ports(proc.pid)
-        if ports:
-            try:
-                proxy = get_proxy(host, ports[0], device, green_mode)
-                proxy.ping()
-                proxy.state()
-                return proxy
-            except DevFailed:
-                pass
-        sleep(delay)
-    else:
-        raise RuntimeError("TangoTest device did not start up!")
-
-
-def ping_device(proxy):
-    if proxy.get_green_mode() == GreenMode.Asyncio:
-        asyncio.get_event_loop().run_until_complete(proxy.ping())
-    else:
-        proxy.ping()
-
-
 # Fixtures
-
-@pytest.fixture(params=[GreenMode.Synchronous,
-                        GreenMode.Asyncio,
-                        GreenMode.Gevent,
-                        GreenMode.Futures],
-                scope="module")
-def tango_test(request):
-    green_mode = request.param
-    server = "TangoTest"
-    inst = "test"
-    device = "sys/tg_test/17"
-    host = platform.node()
-    proc = start_server(server, inst, device)
-    proxy = wait_for_proxy(host, proc, device, green_mode)
-
-    yield proxy
-
-    proc.terminate()
-    # let's not wait for it to exit, that takes too long :)
-
-
 @pytest.fixture(params=ATTRIBUTES)
 def attribute(request):
     return request.param
@@ -212,26 +121,6 @@ def writable_scalar_attribute(request):
                         a.split("_")[-1] not in ("ro", "rww")])
 def writable_spectrum_attribute(request):
     return request.param
-
-
-@pytest.fixture(params=[GreenMode.Synchronous,
-                        GreenMode.Asyncio,
-                        GreenMode.Gevent,
-                        GreenMode.Futures])
-def green_mode_device_proxy(request):
-    green_mode = request.param
-    return device_proxy_map[green_mode]
-
-
-@pytest.fixture
-def simple_device_fqdn():
-    class TestDevice(Device):
-        pass
-
-    context = DeviceTestContext(TestDevice)
-    context.start()
-    yield context.get_device_access()
-    context.stop()
 
 
 # Tests
@@ -450,65 +339,3 @@ def test_command_string(tango_test):
         assert len(result) == 2
         assert_close(result[0], [-10, 200])
         assert_close(result[1], [expected_value, expected_value])
-
-
-def test_repr_uses_info(green_mode_device_proxy, simple_device_fqdn):
-    proxy = green_mode_device_proxy(simple_device_fqdn)
-    assert repr(proxy) == 'TestDevice(test/nodb/testdevice)'
-
-
-def test_repr_default_if_info_unavailable(green_mode_device_proxy):
-    proxy = green_mode_device_proxy(
-        "tango://localhost:0/invalid/test/dev#dbase=no"
-    )
-
-    def bad_info(self):
-        raise RuntimeError("Break info for test")
-
-    proxy.__class__.info = bad_info
-
-    assert repr(proxy) == 'Device(invalid/test/dev)'
-
-
-def test_multiple_repr_calls_only_call_info_once(
-        green_mode_device_proxy, simple_device_fqdn):
-    proxy = green_mode_device_proxy(simple_device_fqdn)
-
-    def mock_info(self):
-        self.info_call_count += 1
-        return self.info_orig()
-
-    proxy.__class__.info_orig = proxy.info
-    proxy.__class__.info = mock_info
-    proxy.info_call_count = 0
-
-    repr(proxy)
-    assert proxy.info_call_count == 1
-    repr(proxy)
-    assert proxy.info_call_count == 1
-
-
-def test_no_memory_leak_for_repr(green_mode_device_proxy, simple_device_fqdn):
-    proxy = green_mode_device_proxy(simple_device_fqdn)
-    ping_device(proxy)
-    weak_ref = weakref.ref(proxy)
-
-    repr(proxy)
-
-    # clear strong reference and check if object can be garbage collected
-    del proxy
-    gc.collect()
-    assert weak_ref() is None
-
-
-def test_no_memory_leak_for_str(green_mode_device_proxy, simple_device_fqdn):
-    proxy = green_mode_device_proxy(simple_device_fqdn)
-    ping_device(proxy)
-    weak_ref = weakref.ref(proxy)
-
-    str(proxy)
-
-    # clear strong reference and check if object can be garbage collected
-    del proxy
-    gc.collect()
-    assert weak_ref() is None
