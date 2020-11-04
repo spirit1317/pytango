@@ -154,6 +154,7 @@ build_script:
   - cmake --build ./ -j 4 --config Release
 
 test_script:
+  - "%PYTHON_ROOT%/Scripts/pip.exe install gevent pytest"
   - cmd: cd "C:\projects\pytango"
   - cmd: echo > pytest_empty_config.txt
   - "%PYTHON_ROOT%/Scripts/pytest.exe -c pytest_empty_config.txt --collect-only -q -q tests"
